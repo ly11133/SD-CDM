@@ -1,8 +1,8 @@
 """Core implementation of SD-CDM.
 
-The implementation follows the manuscript modules:
-BiKD for positive mastery and negative misconception, CAM for strategy-aware
-attention, and a binary prediction objective with semantic regularization.
+The public package keeps the model interface small and consistent with the
+manuscript: BiKD for positive mastery and negative misconception, CAM for
+strategy-aware attention, and BCE plus semantic margin regularization.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ import torch.nn.functional as F
 
 
 class DualChannelEmbedding(nn.Module):
-    """Student-level positive mastery and negative misconception embeddings."""
+    """Student positive mastery and negative misconception embeddings."""
 
     def __init__(self, num_students: int, num_concepts: int):
         super().__init__()
@@ -26,9 +26,19 @@ class DualChannelEmbedding(nn.Module):
         nn.init.xavier_uniform_(self.e_neg.weight)
 
     def forward(self, student_ids: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        h_pos = torch.sigmoid(self.e_pos(student_ids))
-        h_neg = torch.sigmoid(self.e_neg(student_ids))
-        return h_pos, h_neg
+        return torch.sigmoid(self.e_pos(student_ids)), torch.sigmoid(self.e_neg(student_ids))
+
+
+class SingleChannelEmbedding(nn.Module):
+    """NCDM-style single mastery embedding used by ablation variants."""
+
+    def __init__(self, num_students: int, num_concepts: int):
+        super().__init__()
+        self.e_mastery = nn.Embedding(num_students, num_concepts)
+        nn.init.xavier_uniform_(self.e_mastery.weight)
+
+    def forward(self, student_ids: torch.Tensor) -> torch.Tensor:
+        return torch.sigmoid(self.e_mastery(student_ids))
 
 
 class ItemParameters(nn.Module):
@@ -60,14 +70,15 @@ class StrategyEmbedding(nn.Module):
         nn.init.xavier_uniform_(self.e_concept.weight)
 
     def forward(self, student_ids: torch.Tensor, exercise_ids: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        batch_size = student_ids.size(0)
         v_habit = self.e_habit(student_ids)
         e_j = self.e_exercise(exercise_ids)
-        c_k = self.e_concept.weight.unsqueeze(0).expand(student_ids.size(0), -1, -1)
+        c_k = self.e_concept.weight.unsqueeze(0).expand(batch_size, -1, -1)
         return v_habit, e_j, c_k
 
 
 class CognitiveAttentionMachine(nn.Module):
-    """Personalized concept attention over the concepts required by an exercise."""
+    """Personalized concept attention over required concepts."""
 
     def __init__(self, dim: int = 64, hidden_dim: int = 256):
         super().__init__()
@@ -91,15 +102,11 @@ class CognitiveAttentionMachine(nn.Module):
         return torch.nan_to_num(alpha, nan=0.0, posinf=0.0, neginf=0.0)
 
 
-def compute_bidirectional_evidence(
-    h_pos: torch.Tensor,
-    h_neg: torch.Tensor,
-    mu_j: torch.Tensor,
-    q_mask: torch.Tensor,
-) -> torch.Tensor:
-    """Compute concept-level evidence h_pos - mu_j * h_neg over required concepts."""
+def uniform_attention(q_mask: torch.Tensor) -> torch.Tensor:
+    """Uniformly distribute attention over required concepts."""
 
-    return (h_pos - mu_j * h_neg) * q_mask
+    denom = q_mask.sum(dim=-1, keepdim=True).clamp(min=1.0)
+    return q_mask / denom
 
 
 def margin_regularization(
@@ -109,13 +116,13 @@ def margin_regularization(
     labels: torch.Tensor,
     epsilon: float = 0.2,
 ) -> torch.Tensor:
-    """Regularize correct responses so positive evidence exceeds misconception evidence."""
+    """Regularize correct responses so mastery exceeds misconception evidence."""
 
     correct = labels > 0.5
     if correct.sum() == 0:
         return torch.zeros((), device=h_pos.device)
 
-    denom = q_mask.sum(dim=-1).clamp(min=1)
+    denom = q_mask.sum(dim=-1).clamp(min=1.0)
     pos_avg = (h_pos * q_mask).sum(dim=-1) / denom
     neg_avg = (h_neg * q_mask).sum(dim=-1) / denom
     margin = F.relu(neg_avg - pos_avg + epsilon)
@@ -123,7 +130,14 @@ def margin_regularization(
 
 
 class SDCDM(nn.Module):
-    """Strategy-Aware Dual-Channel Cognitive Diagnosis Model."""
+    """Strategy-Aware Dual-Channel Cognitive Diagnosis Model.
+
+    Ablation switches:
+    - ``use_dual_channel=False, use_cam=False``: Base model.
+    - ``use_dual_channel=False, use_cam=True``: w/o BiKD.
+    - ``use_dual_channel=True, use_cam=False``: w/o CAM.
+    - ``use_dual_channel=True, use_cam=True``: full SD-CDM.
+    """
 
     def __init__(
         self,
@@ -134,14 +148,31 @@ class SDCDM(nn.Module):
         cam_hidden: int = 256,
         epsilon: float = 0.2,
         lambda_reg: float = 0.1,
+        use_dual_channel: bool = True,
+        use_cam: bool = True,
     ):
         super().__init__()
         self.epsilon = epsilon
         self.lambda_reg = lambda_reg
-        self.dual_channel = DualChannelEmbedding(num_students, num_concepts)
+        self.use_dual_channel = use_dual_channel
+        self.use_cam = use_cam
+        self.num_concepts = num_concepts
+
+        self.dual_channel = DualChannelEmbedding(num_students, num_concepts) if use_dual_channel else None
+        self.single_channel = SingleChannelEmbedding(num_students, num_concepts) if not use_dual_channel else None
         self.item_params = ItemParameters(num_exercises)
         self.strategy = StrategyEmbedding(num_students, num_exercises, num_concepts, emb_dim)
         self.cam = CognitiveAttentionMachine(emb_dim, cam_hidden)
+
+    def _student_states(self, student_ids: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        if self.use_dual_channel:
+            assert self.dual_channel is not None
+            return self.dual_channel(student_ids)
+
+        assert self.single_channel is not None
+        h_pos = self.single_channel(student_ids)
+        h_neg = torch.zeros_like(h_pos)
+        return h_pos, h_neg
 
     def forward(
         self,
@@ -151,11 +182,17 @@ class SDCDM(nn.Module):
         labels: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         q_matrix = q_matrix.float()
-        h_pos, h_neg = self.dual_channel(student_ids)
+        h_pos, h_neg = self._student_states(student_ids)
         d_j, mu_j = self.item_params(exercise_ids)
-        evidence = compute_bidirectional_evidence(h_pos, h_neg, mu_j, q_matrix)
+
+        if self.use_dual_channel:
+            evidence = (h_pos - mu_j * h_neg) * q_matrix
+        else:
+            evidence = h_pos * q_matrix
+
         v_habit, e_j, c_k = self.strategy(student_ids, exercise_ids)
-        alpha = self.cam(v_habit, e_j, c_k, q_matrix)
+        alpha = self.cam(v_habit, e_j, c_k, q_matrix) if self.use_cam else uniform_attention(q_matrix)
+
         score = (alpha * evidence).sum(dim=-1) - d_j.squeeze(-1)
         pred = torch.sigmoid(score)
 
@@ -163,11 +200,12 @@ class SDCDM(nn.Module):
         if labels is not None:
             labels = labels.float()
             pred_loss = F.binary_cross_entropy(pred.clamp(1e-7, 1 - 1e-7), labels)
-            reg_loss = margin_regularization(h_pos, h_neg, q_matrix, labels, self.epsilon)
+            reg_loss = margin_regularization(h_pos, h_neg, q_matrix, labels, self.epsilon) if self.use_dual_channel else torch.zeros((), device=pred.device)
             loss = pred_loss + self.lambda_reg * reg_loss
 
         return {
             "pred": pred,
+            "P_ij": pred,
             "score": score,
             "h_pos": h_pos,
             "h_neg": h_neg,
@@ -179,10 +217,14 @@ class SDCDM(nn.Module):
         }
 
     @torch.no_grad()
-    def get_student_profile(self, student_ids: torch.Tensor) -> Dict[str, torch.Tensor]:
-        h_pos, h_neg = self.dual_channel(student_ids)
+    def get_diagnostic_profile(self, student_ids: torch.Tensor) -> Dict[str, torch.Tensor]:
+        h_pos, h_neg = self._student_states(student_ids)
         v_habit = self.strategy.e_habit(student_ids)
         return {"h_pos": h_pos, "h_neg": h_neg, "v_habit": v_habit}
+
+    @torch.no_grad()
+    def get_student_profile(self, student_ids: torch.Tensor) -> Dict[str, torch.Tensor]:
+        return self.get_diagnostic_profile(student_ids)
 
     @torch.no_grad()
     def get_item_profile(self, exercise_ids: torch.Tensor) -> Dict[str, torch.Tensor]:
@@ -229,3 +271,9 @@ class SDCDMTrainer:
         self.model.eval()
         out = self.model(student_ids.to(self.device), exercise_ids.to(self.device), q_matrix.to(self.device))
         return out["pred"].cpu()
+
+    @torch.no_grad()
+    def get_diagnostics(self, student_ids: torch.Tensor, exercise_ids: torch.Tensor, q_matrix: torch.Tensor) -> Dict[str, torch.Tensor]:
+        self.model.eval()
+        out = self.model(student_ids.to(self.device), exercise_ids.to(self.device), q_matrix.to(self.device))
+        return {key: value.cpu() for key, value in out.items() if key != "loss"}
