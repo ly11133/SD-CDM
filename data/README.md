@@ -2,6 +2,10 @@
 
 Raw datasets should be placed in `data/raw/` and converted into the normalized files under `data/processed/`.
 
+The repository intentionally keeps both folders ignored by git except for
+`.gitkeep`. Do not commit private datasets or third-party datasets whose license
+does not allow redistribution.
+
 ## Interaction File
 
 Required columns:
@@ -24,6 +28,19 @@ The default loader expects one row per exercise:
 | `c1...cK` | Binary concept indicators |
 
 The first column is treated as the exercise key by default. All remaining columns are treated as concept indicators.
+
+Each exercise row must contain at least one `1` across the concept columns.
+
+## Dummy Data
+
+For a local smoke test, generate synthetic files with:
+
+```bash
+python scripts/generate_dummy_data.py --output-dir data/processed
+```
+
+These files are only for checking that installation, training, and tests run
+end to end. They are not used for paper results.
 
 ## Releasing Data
 
