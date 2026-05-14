@@ -2,17 +2,17 @@ seed: 2026
 device: auto
 
 model:
-  emb_dim: 64
-  cam_hidden: 256
+  emb_dim: 16
+  cam_hidden: 32
   epsilon: 0.2
   lambda_reg: 0.1
 
 training:
-  epochs: 100
-  batch_size: 256
+  epochs: 5
+  batch_size: 128
   lr: 0.001
   weight_decay: 0.00001
-  patience: 10
+  patience: 3
   val_ratio: 0.1
   test_ratio: 0.2
 
