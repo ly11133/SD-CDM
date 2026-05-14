@@ -50,17 +50,51 @@ See `data/README.md` for details.
 ## Quick Start
 
 ```bash
+python scripts/generate_dummy_data.py --output-dir data/processed
+
 python -m sd_cdm.train \
+  --config configs/default.yaml \
   --interactions data/processed/interactions.csv \
   --q-matrix data/processed/q_matrix.csv \
-  --output outputs/run_default
+  --output-dir outputs/default
 ```
 
-For a smoke test without real data:
+The training command writes the following local artifacts under `outputs/default/`:
+
+- `best_model.pt`
+- `history.csv`
+- `metrics.json`
+- `mappings.json`
+
+The default config is intentionally small so the public smoke run finishes
+quickly. Use a separate experiment config for full paper-scale runs.
+
+You can also run the default script:
+
+```bash
+bash scripts/run_default.sh
+```
+
+Run smoke tests with:
 
 ```bash
 python -m pytest tests
 ```
+
+## Model Variants
+
+Use `--variant` to run the implemented ablations:
+
+```bash
+python -m sd_cdm.train \
+  --config configs/default.yaml \
+  --interactions data/processed/interactions.csv \
+  --q-matrix data/processed/q_matrix.csv \
+  --output-dir outputs/base \
+  --variant base
+```
+
+Available variants are `full`, `base`, `wo-bikd`, and `wo-cam`. The default is `full`.
 
 ## Reproducibility Notes
 
@@ -68,6 +102,7 @@ python -m pytest tests
 - Keep dataset preprocessing scripts deterministic.
 - Store final fold splits, random seeds, and evaluation logs under `outputs/` during experiments.
 - Before public release, verify that all reported manuscript results are reproduced by the committed code and documented commands.
+- Real third-party datasets must be downloaded by users and converted to the format in `data/README.md`; do not upload private or redistributable-restricted raw data.
 
 ## Citation
 
@@ -80,6 +115,8 @@ python -m pytest tests
   note    = {Manuscript under preparation}
 }
 ```
+
+Replace this BibTeX entry after the article is formally published.
 
 ## License
 
